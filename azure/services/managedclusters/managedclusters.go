@@ -45,7 +45,7 @@ type ManagedClusterScope interface {
 	GetDefaultAgentPoolSpec() azure.AgentPoolSpec
 }
 
-// Service provides operations on azure resources
+// Service provides operations on azure resources.
 type Service struct {
 	Scope ManagedClusterScope
 	Client

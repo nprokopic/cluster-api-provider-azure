@@ -18,6 +18,10 @@ package scope
 
 import (
 	"context"
+	"encoding/base64"
+	"fmt"
+	"net"
+	"strings"
 
 	"github.com/Azure/go-autorest/autorest"
 	"github.com/go-logr/logr"
@@ -273,4 +277,103 @@ func (s *ManagedControlPlaneScope) GetPrivateDNSZoneName() string {
 // CloudProviderConfigOverrides returns the cloud provider config overrides for the cluster.
 func (s *ManagedControlPlaneScope) CloudProviderConfigOverrides() *infrav1.CloudProviderConfigOverrides {
 	return nil
+}
+
+// ManagedClusterSpec returns the managed cluster spec.
+func (s *ManagedControlPlaneScope) ManagedClusterSpec() (azure.ManagedClusterSpec, error) {
+	decodedSSHPublicKey, err := base64.StdEncoding.DecodeString(s.ControlPlane.Spec.SSHPublicKey)
+	if err != nil {
+		return azure.ManagedClusterSpec{}, errors.Wrap(err, "failed to decode SSHPublicKey")
+	}
+
+	managedClusterSpec := azure.ManagedClusterSpec{
+		Name:                  s.ControlPlane.Name,
+		ResourceGroupName:     s.ControlPlane.Spec.ResourceGroupName,
+		NodeResourceGroupName: s.ControlPlane.Spec.NodeResourceGroupName,
+		Location:              s.ControlPlane.Spec.Location,
+		Tags:                  s.ControlPlane.Spec.AdditionalTags,
+		Version:               strings.TrimPrefix(s.ControlPlane.Spec.Version, "v"),
+		SSHPublicKey:          string(decodedSSHPublicKey),
+		DNSServiceIP:          s.ControlPlane.Spec.DNSServiceIP,
+		VnetSubnetID: azure.SubnetID(
+			s.ControlPlane.Spec.SubscriptionID,
+			s.ControlPlane.Spec.ResourceGroupName,
+			s.ControlPlane.Spec.VirtualNetwork.Name,
+			s.ControlPlane.Spec.VirtualNetwork.Subnet.Name,
+		),
+	}
+
+	if s.ControlPlane.Spec.NetworkPlugin != nil {
+		managedClusterSpec.NetworkPlugin = *s.ControlPlane.Spec.NetworkPlugin
+	}
+	if s.ControlPlane.Spec.NetworkPolicy != nil {
+		managedClusterSpec.NetworkPolicy = *s.ControlPlane.Spec.NetworkPolicy
+	}
+	if s.ControlPlane.Spec.LoadBalancerSKU != nil {
+		managedClusterSpec.LoadBalancerSKU = *s.ControlPlane.Spec.LoadBalancerSKU
+	}
+
+	if net := s.Cluster.Spec.ClusterNetwork; net != nil {
+		if net.Services != nil {
+			// A user may provide zero or one CIDR blocks. If they provide an empty array,
+			// we ignore it and use the default. AKS doesn't support > 1 Service/Pod CIDR.
+			if len(net.Services.CIDRBlocks) > 1 {
+				return azure.ManagedClusterSpec{}, errors.New("managed control planes only allow one service cidr")
+			}
+			if len(net.Services.CIDRBlocks) == 1 {
+				managedClusterSpec.ServiceCIDR = net.Services.CIDRBlocks[0]
+			}
+		}
+		if net.Pods != nil {
+			// A user may provide zero or one CIDR blocks. If they provide an empty array,
+			// we ignore it and use the default. AKS doesn't support > 1 Service/Pod CIDR.
+			if len(net.Pods.CIDRBlocks) > 1 {
+				return azure.ManagedClusterSpec{}, errors.New("managed control planes only allow one service cidr")
+			}
+			if len(net.Pods.CIDRBlocks) == 1 {
+				managedClusterSpec.PodCIDR = net.Pods.CIDRBlocks[0]
+			}
+		}
+	}
+
+	if s.ControlPlane.Spec.DNSServiceIP != nil {
+		if managedClusterSpec.ServiceCIDR == "" {
+			return azure.ManagedClusterSpec{}, fmt.Errorf(s.Cluster.Name + " cluster serviceCIDR must be specified if specifying DNSServiceIP")
+		}
+		_, cidr, err := net.ParseCIDR(managedClusterSpec.ServiceCIDR)
+		if err != nil {
+			return azure.ManagedClusterSpec{}, fmt.Errorf("failed to parse cluster service cidr: %w", err)
+		}
+		ip := net.ParseIP(*s.ControlPlane.Spec.DNSServiceIP)
+		if !cidr.Contains(ip) {
+			return azure.ManagedClusterSpec{}, fmt.Errorf(s.ControlPlane.Name + " DNSServiceIP must reside within the associated cluster serviceCIDR")
+		}
+	}
+
+	return managedClusterSpec, nil
+}
+
+// GetDefaultAgentPoolSpec gets azure.AgentPoolSpec for default agent pool.
+func (s *ManagedControlPlaneScope) GetDefaultAgentPoolSpec() azure.AgentPoolSpec {
+	defaultPoolSpec := azure.AgentPoolSpec{
+		Name:         s.InfraMachinePool.Name,
+		SKU:          s.InfraMachinePool.Spec.SKU,
+		Replicas:     1, // TODO: why not using MachinePool.Spec.Replicas here
+		OSDiskSizeGB: 0,
+	}
+
+	// Set optional values
+	if s.InfraMachinePool.Spec.OSDiskSizeGB != nil {
+		defaultPoolSpec.OSDiskSizeGB = *s.InfraMachinePool.Spec.OSDiskSizeGB
+	}
+	if s.MachinePool.Spec.Replicas != nil {
+		defaultPoolSpec.Replicas = *s.MachinePool.Spec.Replicas
+	}
+
+	return defaultPoolSpec
+}
+
+// SetDefaultAgentPoolSpec sets azure.AgentPoolSpec for default agent pool.
+func (s *ManagedControlPlaneScope) SetDefaultAgentPoolSpec(agentPool azure.AgentPoolSpec) {
+
 }

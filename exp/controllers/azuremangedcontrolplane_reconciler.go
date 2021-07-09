@@ -67,12 +67,14 @@ func (r *azureManagedControlPlaneReconciler) Reconcile(ctx context.Context, scop
 	ctx, span := tele.Tracer().Start(ctx, "controllers.azureManagedControlPlaneReconciler.Reconcile")
 	defer span.End()
 
+	// todo: remove this, it's now in ManagedControlPlaneScope
 	decodedSSHPublicKey, err := base64.StdEncoding.DecodeString(scope.ControlPlane.Spec.SSHPublicKey)
 	if err != nil {
 		return errors.Wrap(err, "failed to decode SSHPublicKey")
 	}
 
-	managedClusterSpec := &managedclusters.Spec{
+	// todo: remove this, it's now in ManagedControlPlaneScope
+	managedClusterSpec := &azure.ManagedClusterSpec{
 		Name:                  scope.ControlPlane.Name,
 		ResourceGroupName:     scope.ControlPlane.Spec.ResourceGroupName,
 		NodeResourceGroupName: scope.ControlPlane.Spec.NodeResourceGroupName,
@@ -89,6 +91,7 @@ func (r *azureManagedControlPlaneReconciler) Reconcile(ctx context.Context, scop
 		),
 	}
 
+	// todo: remove this, it's now in ManagedControlPlaneScope
 	if scope.ControlPlane.Spec.NetworkPlugin != nil {
 		managedClusterSpec.NetworkPlugin = *scope.ControlPlane.Spec.NetworkPlugin
 	}
@@ -137,13 +140,8 @@ func (r *azureManagedControlPlaneReconciler) Delete(ctx context.Context, scope *
 	ctx, span := tele.Tracer().Start(ctx, "controllers.azureManagedControlPlaneReconciler.Delete")
 	defer span.End()
 
-	managedClusterSpec := &managedclusters.Spec{
-		Name:              scope.ControlPlane.Name,
-		ResourceGroupName: scope.ControlPlane.Spec.ResourceGroupName,
-	}
-
 	scope.V(2).Info("Deleting managed cluster")
-	if err := r.managedClustersSvc.Delete(ctx, managedClusterSpec); err != nil {
+	if err := r.managedClustersSvc.Delete(ctx); err != nil {
 		return errors.Wrapf(err, "failed to delete managed cluster %s", scope.ControlPlane.Name)
 	}
 
@@ -160,10 +158,11 @@ func (r *azureManagedControlPlaneReconciler) Delete(ctx context.Context, scope *
 	return nil
 }
 
-func (r *azureManagedControlPlaneReconciler) reconcileManagedCluster(ctx context.Context, scope *scope.ManagedControlPlaneScope, managedClusterSpec *managedclusters.Spec) error {
+func (r *azureManagedControlPlaneReconciler) reconcileManagedCluster(ctx context.Context, scope *scope.ManagedControlPlaneScope, managedClusterSpec *azure.ManagedClusterSpec) error {
 	ctx, span := tele.Tracer().Start(ctx, "controllers.azureManagedControlPlaneReconciler.reconcileManagedCluster")
 	defer span.End()
 
+	// todo: remove this, it's now in ManagedControlPlaneScope
 	if net := scope.Cluster.Spec.ClusterNetwork; net != nil {
 		if net.Services != nil {
 			// A user may provide zero or one CIDR blocks. If they provide an empty array,
@@ -187,6 +186,7 @@ func (r *azureManagedControlPlaneReconciler) reconcileManagedCluster(ctx context
 		}
 	}
 
+	// todo: remove this, it's now in ManagedControlPlaneScope
 	// if DNSServiceIP is specified, ensure it is within the ServiceCIDR address range
 	if scope.ControlPlane.Spec.DNSServiceIP != nil {
 		if managedClusterSpec.ServiceCIDR == "" {
@@ -202,49 +202,50 @@ func (r *azureManagedControlPlaneReconciler) reconcileManagedCluster(ctx context
 		}
 	}
 
-	_, err := r.managedClustersSvc.Get(ctx, managedClusterSpec)
-	// Transient or other failure not due to 404
-	if err != nil && !azure.ResourceNotFound(err) {
-		return errors.Wrap(err, "failed to fetch existing managed cluster")
-	}
-
-	// We are creating this cluster for the first time.
-	// Configure the default pool, rest will be handled by machinepool controller
-	// We do this here because AKS will only let us mutate agent pools via managed
-	// clusters API at create time, not update.
-	if azure.ResourceNotFound(err) {
-		defaultPoolSpec := managedclusters.PoolSpec{
-			Name:         scope.InfraMachinePool.Name,
-			SKU:          scope.InfraMachinePool.Spec.SKU,
-			Replicas:     1,
-			OSDiskSizeGB: 0,
-		}
-
-		// Set optional values
-		if scope.InfraMachinePool.Spec.OSDiskSizeGB != nil {
-			defaultPoolSpec.OSDiskSizeGB = *scope.InfraMachinePool.Spec.OSDiskSizeGB
-		}
-		if scope.MachinePool.Spec.Replicas != nil {
-			defaultPoolSpec.Replicas = *scope.MachinePool.Spec.Replicas
-		}
-
-		// Add to cluster spec
-		managedClusterSpec.AgentPools = []managedclusters.PoolSpec{defaultPoolSpec}
-	}
+	// TODO: move this check for existing cluster into the service
+	// _, err := r.managedClustersSvc.Get(ctx)
+	// // Transient or other failure not due to 404
+	// if err != nil && !azure.ResourceNotFound(err) {
+	// 	return errors.Wrap(err, "failed to fetch existing managed cluster")
+	// }
+	//
+	// // We are creating this cluster for the first time.
+	// // Configure the default pool, rest will be handled by machinepool controller
+	// // We do this here because AKS will only let us mutate agent pools via managed
+	// // clusters API at create time, not update.
+	// if azure.ResourceNotFound(err) {
+	// 	defaultPoolSpec := azure.AgentPoolSpec{
+	// 		Name:         scope.InfraMachinePool.Name,
+	// 		SKU:          scope.InfraMachinePool.Spec.SKU,
+	// 		Replicas:     1,
+	// 		OSDiskSizeGB: 0,
+	// 	}
+	//
+	// 	// Set optional values
+	// 	if scope.InfraMachinePool.Spec.OSDiskSizeGB != nil {
+	// 		defaultPoolSpec.OSDiskSizeGB = *scope.InfraMachinePool.Spec.OSDiskSizeGB
+	// 	}
+	// 	if scope.MachinePool.Spec.Replicas != nil {
+	// 		defaultPoolSpec.Replicas = *scope.MachinePool.Spec.Replicas
+	// 	}
+	//
+	// 	// Add to cluster spec
+	// 	managedClusterSpec.AgentPools = []azure.AgentPoolSpec{defaultPoolSpec}
+	// }
 
 	// Send to Azure for create/update.
-	if err := r.managedClustersSvc.Reconcile(ctx, managedClusterSpec); err != nil {
+	if err := r.managedClustersSvc.Reconcile(ctx); err != nil {
 		return errors.Wrapf(err, "failed to reconcile managed cluster %s", scope.ControlPlane.Name)
 	}
 	return nil
 }
 
-func (r *azureManagedControlPlaneReconciler) reconcileEndpoint(ctx context.Context, scope *scope.ManagedControlPlaneScope, managedClusterSpec *managedclusters.Spec) error {
+func (r *azureManagedControlPlaneReconciler) reconcileEndpoint(ctx context.Context, scope *scope.ManagedControlPlaneScope, managedClusterSpec *azure.ManagedClusterSpec) error {
 	ctx, span := tele.Tracer().Start(ctx, "controllers.azureManagedControlPlaneReconciler.reconcileEndpoint")
 	defer span.End()
 
 	// Fetch newly updated cluster
-	managedClusterResult, err := r.managedClustersSvc.Get(ctx, managedClusterSpec)
+	managedClusterResult, err := r.managedClustersSvc.Get(ctx)
 	if err != nil {
 		return err
 	}
@@ -268,7 +269,7 @@ func (r *azureManagedControlPlaneReconciler) reconcileEndpoint(ctx context.Conte
 	return nil
 }
 
-func (r *azureManagedControlPlaneReconciler) reconcileKubeconfig(ctx context.Context, scope *scope.ManagedControlPlaneScope, managedClusterSpec *managedclusters.Spec) error {
+func (r *azureManagedControlPlaneReconciler) reconcileKubeconfig(ctx context.Context, scope *scope.ManagedControlPlaneScope, managedClusterSpec *azure.ManagedClusterSpec) error {
 	ctx, span := tele.Tracer().Start(ctx, "controllers.azureManagedControlPlaneReconciler.reconcileKubeconfig")
 	defer span.End()
 
